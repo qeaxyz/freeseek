@@ -1,0 +1,5 @@
+requests==2.31.0
+python-dotenv==1.0.0
+typing-extensions==4.9.0
+sseclient-py==1.7.2
+httpx==0.26.0
