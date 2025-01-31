@@ -1,24 +1,46 @@
 import logging
 import json
-from typing import Any, Dict, Optional
+from typing import Optional, Dict, Any
+from functools import wraps
+from .exceptions import APIError
 
 class HelperFunctions:
+    logger = logging.getLogger("freeseek")
+    
     @staticmethod
-    def setup_logging(level: int = logging.INFO, log_format: str = '%(asctime)s - %(levelname)s - %(message)s') -> None:
-        logging.basicConfig(level=level, format=log_format)
-        logging.info("Logging setup complete.")
+    def setup_logging(level: int = logging.INFO, log_file: Optional[str] = None):
+        """Configure logging with optional file output"""
+        handlers = [logging.StreamHandler()]
+        if log_file:
+            handlers.append(logging.FileHandler(log_file))
+            
+        logging.basicConfig(
+            level=level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=handlers
+        )
+        HelperFunctions.logger.info("Logging configured")
 
     @staticmethod
-    def parse_json(response: Any) -> Optional[Dict[str, Any]]:
+    def handle_api_error(func):
+        """Decorator for handling API errors"""
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except APIError as e:
+                HelperFunctions.logger.error(f"API Error: {str(e)}")
+                raise
+            except Exception as e:
+                HelperFunctions.logger.error(f"Unexpected error: {str(e)}")
+                raise APIError("Internal error occurred") from e
+        return wrapper
+
+    @staticmethod
+    def validate_json(payload: str) -> bool:
+        """Validate JSON string format"""
         try:
-            return response.json()
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to decode JSON response: {str(e)}")
-        except AttributeError as e:
-            logging.error(f"Invalid response object: {str(e)}")
-        return None
-
-    @staticmethod
-    def handle_error(error: Exception) -> Dict[str, str]:
-        logging.error(f"An error occurred: {str(error)}")
-        return {"error": str(error)}
+            json.loads(payload)
+            return True
+        except json.JSONDecodeError:
+            return False
