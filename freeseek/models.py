@@ -1,39 +1,37 @@
+from functools import lru_cache
+from typing import Dict, Any
+from .exceptions import ModelValidationError
+from .utils import HelperFunctions
+
 class ModelHandler:
-    """
-    A handler class for interacting with the FreeseekAPI.
-    """
-
-    def __init__(self, api: "FreeseekAPI"):
-        """
-        Initialize the ModelHandler with a FreeseekAPI instance.
-
-        :param api: An instance of FreeseekAPI.
-        """
+    def __init__(self, api):
         self.api = api
+        self.schema_cache = {}
 
-    def infer_model(self, model: str, data: dict) -> dict:
-        """
-        Infer the model with the provided data.
+    def _validate_input(self, model: str, data: dict) -> None:
+        """Validate input data against model schema"""
+        if model not in self.schema_cache:
+            try:
+                schema = self.api.get_model_schema(model)
+                self.schema_cache[model] = schema.get("input_schema", {})
+            except APIError as e:
+                HelperFunctions.logger.warning(f"Failed to fetch schema for {model}: {str(e)}")
+                return
 
-        :param model: The name of the model to infer.
-        :param data: The data to be used for inference.
-        :return: The inference result as a dictionary.
-        """
-        try:
-            return self.api.infer(model, data)
-        except Exception as e:
-            # Handle or log the exception as needed
-            raise RuntimeError(f"Failed to infer model {model}: {e}")
+        required_fields = self.schema_cache[model].get("required", [])
+        for field in required_fields:
+            if field not in data:
+                raise ModelValidationError(f"Missing required field: {field}")
 
-    def get_model_info(self, model: str) -> dict:
-        """
-        Get information about the specified model.
+    def infer_model(self, model: str, data: dict, validate: bool = True) -> Dict[str, Any]:
+        """Perform model inference with optional validation"""
+        if validate:
+            self._validate_input(model, data)
+        return self.api.infer(model, data)
 
-        :param model: The name of the model.
-        :return: The model information as a dictionary.
-        """
-        try:
-            return self.api.get_model_info(model)
-        except Exception as e:
-            # Handle or log the exception as needed
-            raise RuntimeError(f"Failed to get model info for {model}: {e}")
+    @lru_cache(maxsize=32)
+    def get_model_info(self, model: str) -> Dict[str, Any]:
+        return self.api.get_model_info(model)
+
+    def list_available_models(self) -> Dict[str, Any]:
+        return self.api.list_models()

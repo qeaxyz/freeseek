@@ -1,45 +1,49 @@
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from typing import Dict, Any
 from .auth import AuthManager
+from .exceptions import APIError
 
 class FreeseekAPI:
-    def __init__(self, api_key: str):
-        """
-        Initialize the FreeseekAPI with an API key.
-        
-        :param api_key: The API key for authentication.
-        """
-        self.auth_manager = AuthManager(api_key)
-        self.base_url = "https://api.freeseek.com/v1"
+    def __init__(self, api_key: str, base_url: str = "https://api.freeseek.com/v1"):
+        self.auth = AuthManager(api_key)
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.timeout = 30  # seconds
 
-    def infer(self, model: str, data: dict) -> dict:
-        """
-        Perform inference using the specified model and data.
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.RequestException),
+        reraise=True
+    )
+    def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        headers = {"Authorization": f"Bearer {self.auth.token}"}
         
-        :param model: The model to use for inference.
-        :param data: The data to infer on.
-        :return: The inference result as a dictionary.
-        """
-        endpoint = f"{self.base_url}/infer"
-        headers = {"Authorization": f"Bearer {self.auth_manager.get_token()}"}
         try:
-            response = requests.post(endpoint, json={"model": model, "data": data}, headers=headers)
+            response = self.session.request(
+                method,
+                url,
+                headers=headers,
+                timeout=self.timeout,
+                **kwargs
+            )
             response.raise_for_status()
             return response.json()
+        except requests.HTTPError as e:
+            raise APIError(f"HTTP Error: {str(e)}", status_code=e.response.status_code) from e
         except requests.RequestException as e:
-            return {"error": str(e)}
+            raise APIError(f"Request failed: {str(e)}") from e
 
-    def get_model_info(self, model: str) -> dict:
-        """
-        Get information about a specific model.
-        
-        :param model: The model to get information about.
-        :return: The model information as a dictionary.
-        """
-        endpoint = f"{self.base_url}/models/{model}"
-        headers = {"Authorization": f"Bearer {self.auth_manager.get_token()}"}
-        try:
-            response = requests.get(endpoint, headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {"error": str(e)}
+    def infer(self, model: str, data: dict) -> Dict[str, Any]:
+        return self._request("POST", "infer", json={"model": model, "data": data})
+
+    def get_model_info(self, model: str) -> Dict[str, Any]:
+        return self._request("GET", f"models/{model}")
+
+    def get_model_schema(self, model: str) -> Dict[str, Any]:
+        return self._request("GET", f"models/{model}/schema")
+
+    def list_models(self) -> Dict[str, Any]:
+        return self._request("GET", "models")
