@@ -1,6 +1,6 @@
 from functools import lru_cache
 from typing import Dict, Any
-from .exceptions import ModelValidationError
+from .exceptions import APIError, ModelValidationError
 from .utils import HelperFunctions
 
 class ModelHandler:

@@ -2,6 +2,7 @@ import time
 import requests
 from typing import Optional
 from .exceptions import AuthenticationError
+from .utils import HelperFunctions
 
 class AuthManager:
     def __init__(self, api_key: str, auth_endpoint: str = "https://api.freeseek.com/auth"):
@@ -13,6 +14,7 @@ class AuthManager:
     @property
     def token(self) -> str:
         if time.time() > self._token_expiry:
+            HelperFunctions.logger.debug("Token expired or not available, refreshing token.")
             self.refresh_token()
         return self._token
 
@@ -28,7 +30,10 @@ class AuthManager:
             token_data = response.json()
             self._token = token_data["access_token"]
             self._token_expiry = time.time() + token_data["expires_in"]
+            HelperFunctions.logger.info("Successfully refreshed auth token.")
         except requests.RequestException as e:
+            HelperFunctions.logger.error(f"Authentication request failed: {str(e)}")
             raise AuthenticationError(f"Authentication failed: {str(e)}") from e
         except KeyError as e:
+            HelperFunctions.logger.error("Invalid token response format")
             raise AuthenticationError("Invalid token response format") from e
