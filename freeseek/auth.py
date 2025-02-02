@@ -3,7 +3,6 @@ import requests
 from typing import Optional
 from .exceptions import AuthenticationError
 from .utils import HelperFunctions
-
 class AuthManager:
     def __init__(self, api_key: str, auth_endpoint: str = "https://api.freeseek.com/auth"):
         self.api_key = api_key
@@ -19,7 +18,7 @@ class AuthManager:
         return self._token
 
     def refresh_token(self) -> None:
-        """Refresh authentication token using API key"""
+        """Refresh authentication token using API key."""
         try:
             response = requests.post(
                 self.auth_endpoint,

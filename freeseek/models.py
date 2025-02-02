@@ -1,7 +1,14 @@
 from functools import lru_cache
 from typing import Dict, Any
+from pydantic import BaseModel, ValidationError
 from .exceptions import APIError, ModelValidationError
 from .utils import HelperFunctions
+
+
+class InferRequest(BaseModel):
+    model: str
+    data: dict
+
 
 class ModelHandler:
     def __init__(self, api):
@@ -9,7 +16,7 @@ class ModelHandler:
         self.schema_cache = {}
 
     def _validate_input(self, model: str, data: dict) -> None:
-        """Validate input data against model schema"""
+        """Validate input data against model schema."""
         if model not in self.schema_cache:
             try:
                 schema = self.api.get_model_schema(model)
@@ -24,7 +31,7 @@ class ModelHandler:
                 raise ModelValidationError(f"Missing required field: {field}")
 
     def infer_model(self, model: str, data: dict, validate: bool = True) -> Dict[str, Any]:
-        """Perform model inference with optional validation"""
+        """Perform model inference with optional validation."""
         if validate:
             self._validate_input(model, data)
         return self.api.infer(model, data)

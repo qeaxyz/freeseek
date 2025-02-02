@@ -1,17 +1,22 @@
 class FreeseekError(Exception):
-    """Base exception for all Freeseek exceptions"""
+    """Base exception for all Freeseek exceptions."""
     pass
 
 class APIError(FreeseekError):
-    """Exception raised for API-related errors"""
+    """Exception raised for API-related errors."""
     def __init__(self, message, status_code: int = None):
         super().__init__(message)
         self.status_code = status_code
 
 class AuthenticationError(FreeseekError):
-    """Exception raised for authentication failures"""
+    """Exception raised for authentication failures."""
     pass
 
 class ModelValidationError(FreeseekError):
-    """Exception raised for invalid model inputs"""
+    """Exception raised for invalid model inputs."""
+    pass
+
+
+class RateLimitExceededError(APIError):
+    """Exception raised when rate limits are exceeded."""
     pass
