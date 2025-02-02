@@ -6,14 +6,14 @@ from .exceptions import APIError
 
 class HelperFunctions:
     logger = logging.getLogger("freeseek")
-    
+
     @staticmethod
     def setup_logging(level: int = logging.INFO, log_file: Optional[str] = None):
-        """Configure logging with optional file output"""
+        """Configure logging with optional file output."""
         handlers = [logging.StreamHandler()]
         if log_file:
             handlers.append(logging.FileHandler(log_file))
-            
+
         logging.basicConfig(
             level=level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,7 +23,7 @@ class HelperFunctions:
 
     @staticmethod
     def handle_api_error(func):
-        """Decorator for handling API errors"""
+        """Decorator for handling API errors."""
         @wraps(func)
         def wrapper(*args, **kwargs):
             try:
@@ -38,7 +38,7 @@ class HelperFunctions:
 
     @staticmethod
     def validate_json(payload: str) -> bool:
-        """Validate JSON string format"""
+        """Validate JSON string format."""
         try:
             json.loads(payload)
             return True
