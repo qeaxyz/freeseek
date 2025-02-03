@@ -3,7 +3,18 @@ import json
 from typing import Optional, Dict, Any
 from functools import wraps
 from .exceptions import APIError
+from cryptography.fernet import Fernet
 
+class Encryptor:
+    def __init__(self, key: bytes):
+        self.cipher_suite = Fernet(key)
+
+    def encrypt(self, data: str) -> bytes:
+        return self.cipher_suite.encrypt(data.encode())
+
+    def decrypt(self, encrypted_data: bytes) -> str:
+        return self.cipher_suite.decrypt(encrypted_data).decode()
+    
 class HelperFunctions:
     logger = logging.getLogger("freeseek")
 
