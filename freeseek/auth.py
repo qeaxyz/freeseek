@@ -3,7 +3,11 @@ import requests
 from typing import Optional
 from .exceptions import AuthenticationError
 from .utils import HelperFunctions
+
 class AuthManager:
+    # Preemptively refresh token if it is within this many seconds of expiring.
+    TOKEN_GRACE_PERIOD = 300  # 5 minutes
+
     def __init__(self, api_key: str, auth_endpoint: str = "https://api.freeseek.com/auth"):
         self.api_key = api_key
         self.auth_endpoint = auth_endpoint
@@ -12,8 +16,8 @@ class AuthManager:
 
     @property
     def token(self) -> str:
-        if time.time() > self._token_expiry:
-            HelperFunctions.logger.debug("Token expired or not available, refreshing token.")
+        if (not self._token) or (time.time() > self._token_expiry - self.TOKEN_GRACE_PERIOD):
+            HelperFunctions.logger.debug("Token expired, missing, or nearing expiry; refreshing token.")
             self.refresh_token()
         return self._token
 
