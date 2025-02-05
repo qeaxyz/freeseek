@@ -1,14 +1,71 @@
+# sync_client.py
+import json
+import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from typing import Dict, Any, List, Tuple
-from .base_client import BaseClient
-from .models import InferRequest
+from typing import Dict, Any, Generator, Optional, Callable, Union, List, Tuple
+from pydantic import BaseModel, ValidationError
+from .auth import AuthManager
 from .exceptions import APIError, RateLimitExceededError
-from .utils import HelperFunctions
+from .utils import HelperFunctions, ContextLogger
 
-class FreeseekAPI(BaseClient):
+# Type aliases for middleware functions.
+PreRequestMiddleware = Callable[[Dict[str, Any]], Union[Dict[str, Any], None]]
+PostResponseMiddleware = Callable[[Any], Union[Any, None]]
+
+# Pydantic model for inference requests.
+class InferRequest(BaseModel):
+    model: str
+    data: dict
+
+# =============================================================================
+# Circuit Breaker Implementation
+# =============================================================================
+class CircuitBreaker:
+    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout  # in seconds
+        self.failure_count = 0
+        self.last_failure_time: Optional[float] = None
+        self.state = "CLOSED"  # Other states: "OPEN", "HALF_OPEN"
+
+    def _open(self):
+        self.state = "OPEN"
+        self.last_failure_time = time.time()
+        HelperFunctions.logger.warning("Circuit breaker opened.")
+
+    def _close(self):
+        self.state = "CLOSED"
+        self.failure_count = 0
+        self.last_failure_time = None
+        HelperFunctions.logger.info("Circuit breaker closed.")
+
+    def call(self, func: Callable, *args, **kwargs):
+        if self.state == "OPEN":
+            if self.last_failure_time and (time.time() - self.last_failure_time) > self.recovery_timeout:
+                self.state = "HALF_OPEN"
+            else:
+                raise APIError("Circuit breaker is open. Request aborted.")
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            self.failure_count += 1
+            if self.failure_count >= self.failure_threshold:
+                self._open()
+            raise e
+        else:
+            # On success reset failure count if we were half-open.
+            if self.state == "HALF_OPEN":
+                self._close()
+            return result
+
+# =============================================================================
+# Synchronous API Client with Additional Features
+# =============================================================================
+class FreeseekAPI:
     """
-    Synchronous API Client with added circuit breaker, metrics, and batch inference features.
+    Synchronous API Client with added circuit breaker, metrics, and a new batch inference feature.
     """
 
     def __init__(
@@ -21,24 +78,52 @@ class FreeseekAPI(BaseClient):
         circuit_failure_threshold: int = 3,
         circuit_recovery_timeout: int = 30
     ):
-        """
-        Initialize the synchronous API client.
-        """
-        super().__init__(api_key, base_url, timeout)
+        self.auth = AuthManager(api_key)
+        self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
+        self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
-        self.circuit_breaker = self._initialize_circuit_breaker(
-            failure_threshold=circuit_failure_threshold,
-            recovery_timeout=circuit_recovery_timeout
-        )
+        # Circuit breaker for handling repeated failures.
+        self.circuit_breaker = CircuitBreaker(failure_threshold=circuit_failure_threshold,
+                                              recovery_timeout=circuit_recovery_timeout)
+        # Initialize middleware lists.
+        self._pre_request_middlewares: List[PreRequestMiddleware] = []
+        self._post_response_middlewares: List[PostResponseMiddleware] = []
+        # Simple metrics
+        self.metrics = {"requests": 0, "successes": 0, "failures": 0}
+        # Context Logger
+        self.logger = ContextLogger(HelperFunctions.logger)
 
-    def _initialize_circuit_breaker(self, failure_threshold: int, recovery_timeout: int):
-        """
-        Initialize the circuit breaker for handling repeated failures.
-        """
-        from .circuit_breaker import CircuitBreaker
-        return CircuitBreaker(failure_threshold=failure_threshold, recovery_timeout=recovery_timeout)
+    def add_pre_request_middleware(self, middleware: PreRequestMiddleware) -> None:
+        """Register middleware to modify the request context before sending."""
+        self._pre_request_middlewares.append(middleware)
+
+    def add_post_response_middleware(self, middleware: PostResponseMiddleware) -> None:
+        """Register middleware to process the response after receiving."""
+        self._post_response_middlewares.append(middleware)
+
+    def _full_url(self, endpoint: str) -> str:
+        return f"{self.base_url}/{endpoint.lstrip('/')}"
+
+    def _get_headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.auth.token}"}
+
+    def _apply_pre_request_middlewares(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        for middleware in self._pre_request_middlewares:
+            modified = middleware(context)
+            if modified is not None:
+                context = modified
+            self.logger.debug(f"Context after {middleware.__name__}: {context}")
+        return context
+
+    def _apply_post_response_middlewares(self, response: Any) -> Any:
+        for middleware in self._post_response_middlewares:
+            modified = middleware(response)
+            if modified is not None:
+                response = modified
+            self.logger.debug(f"Response after {middleware.__name__}: {getattr(response, 'status_code', 'N/A')}")
+        return response
 
     @retry(
         stop=stop_after_attempt(3),
@@ -47,12 +132,15 @@ class FreeseekAPI(BaseClient):
         reraise=True
     )
     def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """
-        Make a synchronous HTTP request with retries, middleware, and circuit breaker.
-        """
         def do_request():
             url = self._full_url(endpoint)
             headers = self._get_headers()
+
+            # Generate a unique request ID and set contextual metadata
+            request_id = str(uuid.uuid4())
+            self.logger.set_context("request_id", request_id)
+            self.logger.set_context("model", kwargs.get("json", {}).get("model"))
+
             request_context = {
                 "method": method,
                 "url": url,
@@ -62,9 +150,9 @@ class FreeseekAPI(BaseClient):
             HelperFunctions.logger.debug(f"Initial request context: {request_context}")
             request_context = self._apply_pre_request_middlewares(request_context)
 
-            HelperFunctions.logger.debug(
+            self.logger.info(
                 f"Making {request_context['method']} request to {request_context['url']} "
-                f"with headers { {k: 'REDACTED' if k == 'Authorization' else v for k, v in request_context['headers'].items()} } "
+                f"with headers { {k: 'REDACTED' if k=='Authorization' else v for k, v in request_context['headers'].items()} } "
                 f"and kwargs {request_context['kwargs']}"
             )
 
@@ -77,7 +165,7 @@ class FreeseekAPI(BaseClient):
             )
             response.raise_for_status()
 
-            HelperFunctions.logger.debug(f"Response received: {response.status_code}")
+            self.logger.info(f"Response received: {response.status_code}")
             response = self._apply_post_response_middlewares(response)
             return response.json()
 
@@ -88,8 +176,11 @@ class FreeseekAPI(BaseClient):
             return result
         except Exception as e:
             self.metrics["failures"] += 1
-            HelperFunctions.logger.error(f"Request failed: {str(e)}")
+            self.logger.error(f"Request failed: {str(e)}")
             raise APIError(f"Request failed: {str(e)}") from e
+        finally:
+            # Clear contextual metadata after the request is complete
+            self.logger.clear_context()
 
     def infer(self, model: str, data: dict) -> Dict[str, Any]:
         """
@@ -98,7 +189,7 @@ class FreeseekAPI(BaseClient):
         try:
             validated_request = InferRequest(model=model, data=data)
         except ValidationError as ve:
-            HelperFunctions.logger.error(f"Validation error for infer request: {ve.json()}")
+            self.logger.error(f"Validation error for infer request: {ve.json()}")
             raise APIError(f"Invalid input for inference: {ve}") from ve
 
         payload = validated_request.dict()
@@ -111,14 +202,19 @@ class FreeseekAPI(BaseClient):
         try:
             validated_request = InferRequest(model=model, data=data)
         except ValidationError as ve:
-            HelperFunctions.logger.error(f"Validation error for stream_infer request: {ve.json()}")
+            self.logger.error(f"Validation error for stream_infer request: {ve.json()}")
             raise APIError(f"Invalid input for streaming inference: {ve}") from ve
 
         url = self._full_url("infer")
         headers = self._get_headers()
         payload = validated_request.dict()
 
-        HelperFunctions.logger.debug(f"Starting streaming infer for URL: {url}")
+        # Set contextual metadata for logging
+        request_id = str(uuid.uuid4())
+        self.logger.set_context("request_id", request_id)
+        self.logger.set_context("model", model)
+
+        self.logger.info(f"Starting streaming infer for URL: {url}")
         request_context = {
             "method": "POST",
             "url": url,
@@ -140,16 +236,19 @@ class FreeseekAPI(BaseClient):
                     if line:
                         try:
                             chunk = json.loads(line.decode('utf-8'))
-                            HelperFunctions.logger.debug(f"Received chunk: {chunk}")
+                            self.logger.debug(f"Received chunk: {chunk}")
                             yield chunk
                         except json.JSONDecodeError as je:
-                            HelperFunctions.logger.error(f"JSON decode error in streaming response: {str(je)}")
+                            self.logger.error(f"JSON decode error in streaming response: {str(je)}")
         except requests.HTTPError as e:
-            HelperFunctions.logger.error(f"HTTP Error during streaming infer: {str(e)}")
+            self.logger.error(f"HTTP Error during streaming infer: {str(e)}")
             raise APIError(f"HTTP Error during streaming infer: {str(e)}", status_code=e.response.status_code) from e
         except requests.RequestException as e:
-            HelperFunctions.logger.error(f"Streaming request failed: {str(e)}")
+            self.logger.error(f"Streaming request failed: {str(e)}")
             raise APIError(f"Streaming request failed: {str(e)}") from e
+        finally:
+            # Clear contextual metadata after the request is complete
+            self.logger.clear_context()
 
     def get_model_info(self, model: str) -> Dict[str, Any]:
         """
@@ -171,10 +270,11 @@ class FreeseekAPI(BaseClient):
 
     def batch_infer(self, requests_list: List[Tuple[str, dict]], max_workers: int = 5) -> List[Dict[str, Any]]:
         """
-        Perform batch inference concurrently using multiple threads.
+        Perform batch inference concurrently.
+        :param requests_list: List of tuples, where each tuple is (model, data)
+        :param max_workers: Maximum number of threads to use.
+        :return: List of responses.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         responses: List[Dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_req = {
@@ -185,9 +285,9 @@ class FreeseekAPI(BaseClient):
                 model, _ = future_to_req[future]
                 try:
                     result = future.result()
-                    HelperFunctions.logger.debug(f"Batch inference succeeded for model {model}")
+                    self.logger.debug(f"Batch inference succeeded for model {model}")
                     responses.append(result)
                 except Exception as exc:
-                    HelperFunctions.logger.error(f"Batch inference failed for model {model}: {exc}")
+                    self.logger.error(f"Batch inference failed for model {model}: {exc}")
                     responses.append({"model": model, "error": str(exc)})
         return responses

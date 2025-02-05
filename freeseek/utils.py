@@ -18,19 +18,17 @@ class Encryptor:
 class HelperFunctions:
     logger = logging.getLogger("freeseek")
 
-    @staticmethod
+@staticmethod
     def setup_logging(level: int = logging.INFO, log_file: Optional[str] = None):
-        """Configure logging with optional file output."""
-        handlers = [logging.StreamHandler()]
-        if log_file:
-            handlers.append(logging.FileHandler(log_file))
-
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=handlers
-        )
-        HelperFunctions.logger.info("Logging configured")
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(request_id)s - %(model)s',
+        handlers=handlers
+    )
+    HelperFunctions.logger.info("Logging configured")
 
     @staticmethod
     def handle_api_error(func):
@@ -83,3 +81,45 @@ class RateLimitHandler:
         sleep_time = max(0, self.rate_limit_reset_time - current_time)
         logging.info(f"Rate limit exceeded. Sleeping for {sleep_time} seconds.")
         time.sleep(sleep_time)
+
+class ContextLogger:
+    """
+    Logger with dynamic contextual metadata support.
+    """
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.context: Dict[str, Any] = {}
+
+    def set_context(self, key: str, value: Any):
+        """
+        Add or update contextual metadata.
+        """
+        self.context[key] = value
+
+    def clear_context(self):
+        """
+        Clear all contextual metadata.
+        """
+        self.context.clear()
+
+    def log(self, level: int, message: str, extra: Optional[Dict[str, Any]] = None):
+        """
+        Log a message with contextual metadata.
+        """
+        combined_extra = {**self.context, **(extra or {})}
+        self.logger.log(level, message, extra=combined_extra)
+
+    def debug(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        self.log(logging.DEBUG, message, extra)
+
+    def info(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        self.log(logging.INFO, message, extra)
+
+    def warning(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        self.log(logging.WARNING, message, extra)
+
+    def error(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        self.log(logging.ERROR, message, extra)
+
+    def critical(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        self.log(logging.CRITICAL, message, extra)

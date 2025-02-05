@@ -27,3 +27,15 @@ class MiddlewareHandler:
             if modified is not None:
                 response = modified
         return response
+
+class ContextLoggingMiddleware:
+    def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Middleware to attach contextual metadata to logs.
+        """
+        request_id = str(uuid.uuid4())
+        HelperFunctions.logger.info(
+            f"Processing request with ID {request_id}",
+            extra={"request_id": request_id, "model": context.get("model")}
+        )
+        return context
