@@ -1,11 +1,12 @@
 import asyncio
 import httpx
 import json
+import time
 from typing import Dict, Any, AsyncGenerator, List, Tuple
 from .base_client import BaseClient
 from .models import InferRequest
 from .exceptions import APIError, RateLimitExceededError
-from .utils import HelperFunctions
+from .utils import HelperFunctions, ContextLogger
 
 class AsyncFreeseekAPI(BaseClient):
     """
@@ -33,6 +34,8 @@ class AsyncFreeseekAPI(BaseClient):
             failure_threshold=circuit_failure_threshold,
             recovery_timeout=circuit_recovery_timeout
         )
+        # Initialize ContextLogger
+        self.logger = ContextLogger(HelperFunctions.logger)
 
     def _initialize_circuit_breaker(self, failure_threshold: int, recovery_timeout: int):
         """
@@ -52,7 +55,7 @@ class AsyncFreeseekAPI(BaseClient):
                 modified = middleware(context)
             if modified is not None:
                 context = modified
-            HelperFunctions.logger.debug(f"Async context after {middleware.__name__}: {context}")
+            self.logger.debug(f"Async context after {middleware.__name__}: {context}")
         return context
 
     async def _apply_post_response_middlewares(self, response: Any) -> Any:
@@ -66,7 +69,7 @@ class AsyncFreeseekAPI(BaseClient):
                 modified = middleware(response)
             if modified is not None:
                 response = modified
-            HelperFunctions.logger.debug(f"Async response after {middleware.__name__}: {getattr(response, 'status_code', 'N/A')}")
+            self.logger.debug(f"Async response after {middleware.__name__}: {getattr(response, 'status_code', 'N/A')}")
         return response
 
     @retry(
@@ -88,26 +91,33 @@ class AsyncFreeseekAPI(BaseClient):
                 "headers": headers,
                 "kwargs": kwargs,
             }
-            HelperFunctions.logger.debug(f"Initial async request context: {request_context}")
+
+            # Generate a unique request ID and set contextual metadata
+            request_id = str(uuid.uuid4())
+            self.logger.set_context("request_id", request_id)
+            self.logger.set_context("model", kwargs.get("json", {}).get("model"))
+
+            self.logger.info(f"Making async {request_context['method']} request to {request_context['url']}")
             request_context = await self._apply_pre_request_middlewares(request_context)
 
-            HelperFunctions.logger.debug(
-                f"Making async {request_context['method']} request to {request_context['url']} "
-                f"with headers { {k: 'REDACTED' if k == 'Authorization' else v for k, v in request_context['headers'].items()} } "
-                f"and kwargs {request_context['kwargs']}"
-            )
+            try:
+                response = await self.client.request(
+                    request_context["method"],
+                    request_context["url"],
+                    headers=request_context["headers"],
+                    **request_context["kwargs"]
+                )
+                response.raise_for_status()
 
-            response = await self.client.request(
-                request_context["method"],
-                request_context["url"],
-                headers=request_context["headers"],
-                **request_context["kwargs"]
-            )
-            response.raise_for_status()
-
-            HelperFunctions.logger.debug(f"Async response received: {response.status_code}")
-            response = await self._apply_post_response_middlewares(response)
-            return response.json()
+                self.logger.info(f"Async response received: {response.status_code}")
+                response = await self._apply_post_response_middlewares(response)
+                return response.json()
+            except Exception as e:
+                self.logger.error(f"Async request failed: {str(e)}")
+                raise APIError(f"Async request failed: {str(e)}") from e
+            finally:
+                # Clear contextual metadata after the request is complete
+                self.logger.clear_context()
 
         self.metrics["requests"] += 1
         try:
@@ -116,7 +126,7 @@ class AsyncFreeseekAPI(BaseClient):
             return result
         except Exception as e:
             self.metrics["failures"] += 1
-            HelperFunctions.logger.error(f"Async request failed: {str(e)}")
+            self.logger.error(f"Async request failed: {str(e)}")
             raise APIError(f"Async request failed: {str(e)}") from e
 
     async def infer(self, model: str, data: dict) -> Dict[str, Any]:
@@ -126,7 +136,7 @@ class AsyncFreeseekAPI(BaseClient):
         try:
             validated_request = InferRequest(model=model, data=data)
         except ValidationError as ve:
-            HelperFunctions.logger.error(f"Validation error for async infer: {ve.json()}")
+            self.logger.error(f"Validation error for async infer: {ve.json()}")
             raise APIError(f"Invalid input for async inference: {ve}") from ve
 
         payload = validated_request.dict()
@@ -139,14 +149,19 @@ class AsyncFreeseekAPI(BaseClient):
         try:
             validated_request = InferRequest(model=model, data=data)
         except ValidationError as ve:
-            HelperFunctions.logger.error(f"Validation error for async stream_infer: {ve.json()}")
+            self.logger.error(f"Validation error for async stream_infer: {ve.json()}")
             raise APIError(f"Invalid input for async streaming inference: {ve}") from ve
 
         url = self._full_url("infer")
         headers = self._get_headers()
         payload = validated_request.dict()
 
-        HelperFunctions.logger.debug(f"Starting async streaming infer for URL: {url}")
+        # Set contextual metadata for logging
+        request_id = str(uuid.uuid4())
+        self.logger.set_context("request_id", request_id)
+        self.logger.set_context("model", model)
+
+        self.logger.info(f"Starting async streaming infer for URL: {url}")
         request_context = {
             "method": "POST",
             "url": url,
@@ -169,13 +184,16 @@ class AsyncFreeseekAPI(BaseClient):
                     if line:
                         try:
                             chunk = json.loads(line)
-                            HelperFunctions.logger.debug(f"Received async chunk: {chunk}")
+                            self.logger.debug(f"Received async chunk: {chunk}")
                             yield chunk
                         except json.JSONDecodeError as je:
-                            HelperFunctions.logger.error(f"Async JSON decode error: {str(je)}")
+                            self.logger.error(f"Async JSON decode error: {str(je)}")
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            HelperFunctions.logger.error(f"Async streaming request error: {str(e)}")
+            self.logger.error(f"Async streaming request error: {str(e)}")
             raise APIError(f"Async streaming request failed: {str(e)}") from e
+        finally:
+            # Clear contextual metadata after the request is complete
+            self.logger.clear_context()
 
     async def get_model_info(self, model: str) -> Dict[str, Any]:
         """
@@ -205,7 +223,7 @@ class AsyncFreeseekAPI(BaseClient):
         responses = []
         for (model, data), result in zip(requests_list, results):
             if isinstance(result, Exception):
-                HelperFunctions.logger.error(f"Async batch inference failed for model {model}: {result}")
+                self.logger.error(f"Async batch inference failed for model {model}: {result}")
                 responses.append({"model": model, "error": str(result)})
             else:
                 responses.append(result)
