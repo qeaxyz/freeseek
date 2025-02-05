@@ -149,10 +149,4 @@ Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
 
-## Support 💬
-
-Need help? Join our community on [Discord](https://discord.gg/example) or open an issue on GitHub.
-
----
-
 **Happy Coding!** 🎉👩💻👨💻
