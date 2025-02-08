@@ -1,6 +1,6 @@
-# sync_client.py
 import json
 import time
+import uuid
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -65,9 +65,8 @@ class CircuitBreaker:
 # =============================================================================
 class FreeseekAPI:
     """
-    Synchronous API Client with added circuit breaker, metrics, and a new batch inference feature.
+    Synchronous API Client with added circuit breaker, metrics, and batch inference features.
     """
-
     def __init__(
         self,
         api_key: str,
@@ -76,7 +75,11 @@ class FreeseekAPI:
         max_retries: int = 3,
         backoff_factor: int = 1,
         circuit_failure_threshold: int = 3,
-        circuit_recovery_timeout: int = 30
+        circuit_recovery_timeout: int = 30,
+        log_middlewares: bool = True,
+        retry_stop_attempts: int = 3,
+        retry_wait_min: int = 2,
+        retry_wait_max: int = 10
     ):
         self.auth = AuthManager(api_key)
         self.base_url = base_url.rstrip("/")
@@ -84,16 +87,21 @@ class FreeseekAPI:
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
-        # Circuit breaker for handling repeated failures.
-        self.circuit_breaker = CircuitBreaker(failure_threshold=circuit_failure_threshold,
-                                              recovery_timeout=circuit_recovery_timeout)
-        # Initialize middleware lists.
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=circuit_failure_threshold,
+            recovery_timeout=circuit_recovery_timeout
+        )
+        self.retry_config = {
+            "stop": stop_after_attempt(retry_stop_attempts),
+            "wait": wait_exponential(multiplier=backoff_factor, min=retry_wait_min, max=retry_wait_max),
+            "retry": retry_if_exception_type(requests.RequestException),
+            "reraise": True,
+        }
         self._pre_request_middlewares: List[PreRequestMiddleware] = []
         self._post_response_middlewares: List[PostResponseMiddleware] = []
-        # Simple metrics
         self.metrics = {"requests": 0, "successes": 0, "failures": 0}
-        # Context Logger
         self.logger = ContextLogger(HelperFunctions.logger)
+        self.log_middlewares = log_middlewares
 
     def add_pre_request_middleware(self, middleware: PreRequestMiddleware) -> None:
         """Register middleware to modify the request context before sending."""
@@ -114,7 +122,8 @@ class FreeseekAPI:
             modified = middleware(context)
             if modified is not None:
                 context = modified
-            self.logger.debug(f"Context after {middleware.__name__}: {context}")
+            if self.log_middlewares:
+                self.logger.debug(f"Context after {middleware.__name__}: {context}")
         return context
 
     def _apply_post_response_middlewares(self, response: Any) -> Any:
@@ -122,52 +131,40 @@ class FreeseekAPI:
             modified = middleware(response)
             if modified is not None:
                 response = modified
-            self.logger.debug(f"Response after {middleware.__name__}: {getattr(response, 'status_code', 'N/A')}")
+            if self.log_middlewares:
+                self.logger.debug(f"Response after {middleware.__name__}: {getattr(response, 'status_code', 'N/A')}")
         return response
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(requests.RequestException),
-        reraise=True
-    )
+    @retry(**self.retry_config)
     def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         def do_request():
             url = self._full_url(endpoint)
             headers = self._get_headers()
-
-            # Generate a unique request ID and set contextual metadata
-            request_id = str(uuid.uuid4())
-            self.logger.set_context("request_id", request_id)
-            self.logger.set_context("model", kwargs.get("json", {}).get("model"))
-
             request_context = {
                 "method": method,
                 "url": url,
                 "headers": headers,
                 "kwargs": kwargs,
             }
-            HelperFunctions.logger.debug(f"Initial request context: {request_context}")
-            request_context = self._apply_pre_request_middlewares(request_context)
-
-            self.logger.info(
-                f"Making {request_context['method']} request to {request_context['url']} "
-                f"with headers { {k: 'REDACTED' if k=='Authorization' else v for k, v in request_context['headers'].items()} } "
-                f"and kwargs {request_context['kwargs']}"
-            )
-
-            response = self.session.request(
-                request_context["method"],
-                request_context["url"],
-                headers=request_context["headers"],
-                timeout=self.timeout,
-                **request_context["kwargs"]
-            )
-            response.raise_for_status()
-
-            self.logger.info(f"Response received: {response.status_code}")
-            response = self._apply_post_response_middlewares(response)
-            return response.json()
+            request_id = str(uuid.uuid4())
+            with self.log_context(request_id, kwargs.get("json", {}).get("model")):
+                self.logger.info(
+                    f"Making {request_context['method']} request to {request_context['url']} "
+                    f"with headers { {k: 'REDACTED' if k == 'Authorization' else v for k, v in request_context['headers'].items()} } "
+                    f"and kwargs {request_context['kwargs']}"
+                )
+                request_context = self._apply_pre_request_middlewares(request_context)
+                response = self.session.request(
+                    request_context["method"],
+                    request_context["url"],
+                    headers=request_context["headers"],
+                    timeout=self.timeout,
+                    **request_context["kwargs"]
+                )
+                response.raise_for_status()
+                self.logger.info(f"Response received: {response.status_code}")
+                response = self._apply_post_response_middlewares(response)
+                return response.json()
 
         self.metrics["requests"] += 1
         try:
@@ -177,9 +174,20 @@ class FreeseekAPI:
         except Exception as e:
             self.metrics["failures"] += 1
             self.logger.error(f"Request failed: {str(e)}")
-            raise APIError(f"Request failed: {str(e)}") from e
+            raise APIError(
+                f"Request failed: {str(e)}",
+                status_code=getattr(e.response, "status_code", None),
+                response_body=getattr(e.response, "text", None)
+            ) from e
+
+    @contextlib.contextmanager
+    def log_context(self, request_id: str, model: str):
+        """Context manager for setting and clearing logging context."""
+        self.logger.set_context("request_id", request_id)
+        self.logger.set_context("model", model)
+        try:
+            yield
         finally:
-            # Clear contextual metadata after the request is complete
             self.logger.clear_context()
 
     def infer(self, model: str, data: dict) -> Dict[str, Any]:
@@ -191,7 +199,6 @@ class FreeseekAPI:
         except ValidationError as ve:
             self.logger.error(f"Validation error for infer request: {ve.json()}")
             raise APIError(f"Invalid input for inference: {ve}") from ve
-
         payload = validated_request.dict()
         return self._request("POST", "infer", json=payload)
 
@@ -204,51 +211,45 @@ class FreeseekAPI:
         except ValidationError as ve:
             self.logger.error(f"Validation error for stream_infer request: {ve.json()}")
             raise APIError(f"Invalid input for streaming inference: {ve}") from ve
-
         url = self._full_url("infer")
         headers = self._get_headers()
         payload = validated_request.dict()
-
-        # Set contextual metadata for logging
         request_id = str(uuid.uuid4())
-        self.logger.set_context("request_id", request_id)
-        self.logger.set_context("model", model)
-
-        self.logger.info(f"Starting streaming infer for URL: {url}")
-        request_context = {
-            "method": "POST",
-            "url": url,
-            "headers": headers,
-            "kwargs": {"json": payload, "timeout": self.timeout, "stream": True},
-        }
-        request_context = self._apply_pre_request_middlewares(request_context)
-
-        try:
-            with self.session.post(
-                request_context["url"],
-                headers=request_context["headers"],
-                **request_context["kwargs"]
-            ) as response:
-                response.raise_for_status()
-                response = self._apply_post_response_middlewares(response)
-
-                for line in response.iter_lines():
-                    if line:
-                        try:
-                            chunk = json.loads(line.decode('utf-8'))
-                            self.logger.debug(f"Received chunk: {chunk}")
-                            yield chunk
-                        except json.JSONDecodeError as je:
-                            self.logger.error(f"JSON decode error in streaming response: {str(je)}")
-        except requests.HTTPError as e:
-            self.logger.error(f"HTTP Error during streaming infer: {str(e)}")
-            raise APIError(f"HTTP Error during streaming infer: {str(e)}", status_code=e.response.status_code) from e
-        except requests.RequestException as e:
-            self.logger.error(f"Streaming request failed: {str(e)}")
-            raise APIError(f"Streaming request failed: {str(e)}") from e
-        finally:
-            # Clear contextual metadata after the request is complete
-            self.logger.clear_context()
+        with self.log_context(request_id, model):
+            self.logger.info(f"Starting streaming infer for URL: {url}")
+            request_context = {
+                "method": "POST",
+                "url": url,
+                "headers": headers,
+                "kwargs": {"json": payload, "timeout": self.timeout, "stream": True},
+            }
+            request_context = self._apply_pre_request_middlewares(request_context)
+            try:
+                with self.session.post(
+                    request_context["url"],
+                    headers=request_context["headers"],
+                    **request_context["kwargs"]
+                ) as response:
+                    response.raise_for_status()
+                    response = self._apply_post_response_middlewares(response)
+                    for line in response.iter_lines():
+                        if line:
+                            try:
+                                chunk = json.loads(line.decode('utf-8'))
+                                self.logger.debug(f"Received chunk: {chunk}")
+                                yield chunk
+                            except json.JSONDecodeError as je:
+                                self.logger.error(f"JSON decode error in streaming response: {str(je)}. Skipping line.")
+                                continue
+            except requests.HTTPError as e:
+                self.logger.error(f"HTTP Error during streaming infer: {str(e)}")
+                raise APIError(
+                    f"HTTP Error during streaming infer: {str(e)}",
+                    status_code=e.response.status_code
+                ) from e
+            except requests.RequestException as e:
+                self.logger.error(f"Streaming request failed: {str(e)}")
+                raise APIError(f"Streaming request failed: {str(e)}") from e
 
     def get_model_info(self, model: str) -> Dict[str, Any]:
         """
@@ -271,9 +272,6 @@ class FreeseekAPI:
     def batch_infer(self, requests_list: List[Tuple[str, dict]], max_workers: int = 5) -> List[Dict[str, Any]]:
         """
         Perform batch inference concurrently.
-        :param requests_list: List of tuples, where each tuple is (model, data)
-        :param max_workers: Maximum number of threads to use.
-        :return: List of responses.
         """
         responses: List[Dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -288,6 +286,16 @@ class FreeseekAPI:
                     self.logger.debug(f"Batch inference succeeded for model {model}")
                     responses.append(result)
                 except Exception as exc:
-                    self.logger.error(f"Batch inference failed for model {model}: {exc}")
-                    responses.append({"model": model, "error": str(exc)})
+                    self.logger.error(f"Batch inference failed for model {model}: {type(exc).__name__}: {exc}")
+                    responses.append({"model": model, "error": {"type": type(exc).__name__, "message": str(exc)}})
         return responses
+
+    def close(self):
+        """Close the underlying session."""
+        self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
