@@ -1,11 +1,12 @@
-def generate_boilerplate(language: str) -> str:
-    if language == 'python':
-        return """
+def generate_boilerplate(language: str, api_key: str = "YOUR_API_KEY") -> str:
+    boilerplates = {
+        "python": f'''\
 from freeseek.api import FreeseekAPI
 
-api_client = FreeseekAPI(api_key="YOUR_API_KEY")
-result = api_client.infer("example-model", {"input": "Hello, world!"})
+api_client = FreeseekAPI(api_key="{api_key}")
+result = api_client.infer("example-model", {{"input": "Hello, world!"}})
 print(result)
-"""
-    else:
-        return "Unsupported language"
+'''
+    }
+
+    return boilerplates.get(language.lower(), "Unsupported language")

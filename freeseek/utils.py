@@ -2,8 +2,12 @@ import logging
 import json
 from typing import Optional, Dict, Any
 from functools import wraps
-from .exceptions import APIError
+import time
 from cryptography.fernet import Fernet
+
+# Custom Exception (Assuming it's defined in a separate file)
+class APIError(Exception):
+    pass
 
 class Encryptor:
     def __init__(self, key: bytes):
@@ -14,21 +18,21 @@ class Encryptor:
 
     def decrypt(self, encrypted_data: bytes) -> str:
         return self.cipher_suite.decrypt(encrypted_data).decode()
-    
+
 class HelperFunctions:
     logger = logging.getLogger("freeseek")
 
-@staticmethod
+    @staticmethod
     def setup_logging(level: int = logging.INFO, log_file: Optional[str] = None):
-    handlers = [logging.StreamHandler()]
-    if log_file:
-        handlers.append(logging.FileHandler(log_file))
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(request_id)s - %(model)s',
-        handlers=handlers
-    )
-    HelperFunctions.logger.info("Logging configured")
+        handlers = [logging.StreamHandler()]
+        if log_file:
+            handlers.append(logging.FileHandler(log_file))
+        logging.basicConfig(
+            level=level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=handlers
+        )
+        HelperFunctions.logger.info("Logging configured")
 
     @staticmethod
     def handle_api_error(func):
