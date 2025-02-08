@@ -15,6 +15,11 @@ class BaseClient:
         self._pre_request_middlewares: List[PreRequestMiddleware] = []
         self._post_response_middlewares: List[PostResponseMiddleware] = []
         self.metrics = {"requests": 0, "successes": 0, "failures": 0}
+        self.optimizer = AdaptiveQueryOptimizer()
+
+    def infer(self, model, data):
+        optimized_model, optimized_data = self.optimizer.process_request(model, data)
+        return self._send_request(optimized_model, optimized_data)
 
     def _full_url(self, endpoint: str) -> str:
         return f"{self.base_url}/{endpoint.lstrip('/')}"
